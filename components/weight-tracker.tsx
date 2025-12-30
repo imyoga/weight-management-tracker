@@ -6,34 +6,134 @@ import { Label } from "@/components/ui/label"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Line, LineChart, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Legend } from "recharts"
-import { ChartContainer, ChartTooltip } from "@/components/ui/chart"
+import { Line } from "react-chartjs-2"
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip,
+  Legend,
+  type Chart,
+  type ChartEvent,
+  type Plugin,
+} from "chart.js"
+import annotationPlugin from "chartjs-plugin-annotation"
 import { Activity, Target, TrendingDown, TrendingUp, Calendar, Info, Download } from "lucide-react"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import html2canvas from "html2canvas"
+import { toPng } from "html-to-image"
+
+// Custom crosshair plugin with axis labels
+const crosshairPlugin: Plugin<"line"> = {
+  id: "customCrosshair",
+  afterDraw: (chart: Chart<"line">) => {
+    const tooltip = chart.tooltip
+    if (!tooltip || !tooltip.opacity || tooltip.dataPoints === undefined || tooltip.dataPoints.length === 0) {
+      return
+    }
+
+    const ctx = chart.ctx
+    const chartArea = chart.chartArea
+    const dataPoint = tooltip.dataPoints[0]
+    const x = dataPoint.element.x
+    const y = dataPoint.element.y
+
+    ctx.save()
+    ctx.setLineDash([5, 5])
+    ctx.lineWidth = 1
+    ctx.strokeStyle = "#6b7280"
+
+    // Vertical line from point to x-axis
+    ctx.beginPath()
+    ctx.moveTo(x, y)
+    ctx.lineTo(x, chartArea.bottom)
+    ctx.stroke()
+
+    // Horizontal line from point to left y-axis (weight)
+    ctx.beginPath()
+    ctx.moveTo(chartArea.left, y)
+    ctx.lineTo(x, y)
+    ctx.stroke()
+
+    // Get BMI value and draw horizontal line to right y-axis
+    if (tooltip.dataPoints.length > 1) {
+      const bmiPoint = tooltip.dataPoints[1]
+      const bmiY = bmiPoint.element.y
+      ctx.beginPath()
+      ctx.moveTo(x, bmiY)
+      ctx.lineTo(chartArea.right, bmiY)
+      ctx.stroke()
+
+      // Draw BMI axis label
+      const bmiValue = bmiPoint.parsed.y
+      ctx.setLineDash([])
+      ctx.fillStyle = "rgb(168, 85, 247)"
+      ctx.font = "bold 11px sans-serif"
+      ctx.textAlign = "left"
+      ctx.fillText(bmiValue.toFixed(1), chartArea.right + 5, bmiY + 4)
+    }
+
+    // Draw weight axis label
+    const weightValue = dataPoint.parsed.y
+    ctx.setLineDash([])
+    ctx.fillStyle = "rgb(99, 102, 241)"
+    ctx.font = "bold 11px sans-serif"
+    ctx.textAlign = "right"
+    ctx.fillText(weightValue.toFixed(1), chartArea.left - 5, y + 4)
+
+    // Draw x-axis label
+    const xLabel = dataPoint.label
+    ctx.fillStyle = "#374151"
+    ctx.font = "bold 11px sans-serif"
+    ctx.textAlign = "center"
+    ctx.fillText(xLabel, x, chartArea.bottom + 15)
+
+    ctx.restore()
+  },
+}
+
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip,
+  Legend,
+  annotationPlugin,
+  crosshairPlugin
+)
 
 type WeightUnit = "kg" | "lbs"
 type HeightUnit = "cm" | "ft"
+type ViewMode = "daily" | "weekly" | "monthly"
 
 interface ForecastData {
-  week: number
+  period: number
+  week?: number
+  day?: number
+  monthNum?: number
   weight: number
   bmi: number
   date: string
   month: string
+  fullDate: Date
 }
 
 export default function WeightTracker() {
   const [heightFeet, setHeightFeet] = useState("")
   const [heightInches, setHeightInches] = useState("")
   const [heightCm, setHeightCm] = useState("")
-  const [heightUnit, setHeightUnit] = useState<HeightUnit>("cm")
+  const [heightUnit, setHeightUnit] = useState<HeightUnit>("ft")
   const [currentWeight, setCurrentWeight] = useState("")
   const [goalWeight, setGoalWeight] = useState("")
   const [weightUnit, setWeightUnit] = useState<WeightUnit>("kg")
   const [customWeeklyChange, setCustomWeeklyChange] = useState("")
   const [forecast, setForecast] = useState<ForecastData[]>([])
+  const [viewMode, setViewMode] = useState<ViewMode>("weekly")
   const [recommendedWeight, setRecommendedWeight] = useState<{ min: number; max: number } | null>(null)
   const [goalBMI, setGoalBMI] = useState<number | null>(null)
   const [stats, setStats] = useState<{
@@ -149,15 +249,18 @@ export default function WeightTracker() {
       weekDate.setDate(today.getDate() + week * 7)
 
       forecastData.push({
+        period: week,
         week,
         weight: Number.parseFloat(finalWeight.toFixed(1)),
         bmi: Number.parseFloat(calculateBMI(finalWeight, height).toFixed(1)),
         date: weekDate.toLocaleDateString("en-US", { day: "numeric" }),
         month: weekDate.toLocaleDateString("en-US", { month: "short" }),
+        fullDate: weekDate,
       })
     }
 
     setForecast(forecastData)
+    setViewMode("weekly")
     setStats({
       weeklyChange: Math.abs(signedWeeklyChange),
       totalWeeks,
@@ -168,6 +271,92 @@ export default function WeightTracker() {
       safeWeeklyMax,
     })
   }
+
+  // Generate daily data from weekly forecast (linear interpolation)
+  const getDailyForecast = (): ForecastData[] => {
+    if (forecast.length < 2 || !stats) return []
+    
+    const dailyData: ForecastData[] = []
+    const height = getHeightValue()
+    const current = Number.parseFloat(currentWeight)
+    const goal = Number.parseFloat(goalWeight)
+    const dailyChange = (stats.isWeightLoss ? -stats.weeklyChange : stats.weeklyChange) / 7
+    const totalDays = stats.totalWeeks * 7
+    const today = new Date()
+
+    for (let day = 0; day <= totalDays; day++) {
+      const projectedWeight = current + dailyChange * day
+      const finalWeight = stats.isWeightLoss 
+        ? Math.max(projectedWeight, goal) 
+        : Math.min(projectedWeight, goal)
+
+      const dayDate = new Date(today)
+      dayDate.setDate(today.getDate() + day)
+
+      dailyData.push({
+        period: day,
+        day,
+        weight: Number.parseFloat(finalWeight.toFixed(1)),
+        bmi: Number.parseFloat(calculateBMI(finalWeight, height).toFixed(1)),
+        date: dayDate.toLocaleDateString("en-US", { day: "numeric" }),
+        month: dayDate.toLocaleDateString("en-US", { month: "short" }),
+        fullDate: dayDate,
+      })
+    }
+
+    return dailyData
+  }
+
+  // Generate monthly data from weekly forecast
+  const getMonthlyForecast = (): ForecastData[] => {
+    if (forecast.length < 2 || !stats) return []
+    
+    const monthlyData: ForecastData[] = []
+    const height = getHeightValue()
+    const current = Number.parseFloat(currentWeight)
+    const goal = Number.parseFloat(goalWeight)
+    const weeksPerMonth = 4.33
+    const monthlyChange = (stats.isWeightLoss ? -stats.weeklyChange : stats.weeklyChange) * weeksPerMonth
+    const totalMonths = Math.ceil(stats.totalWeeks / weeksPerMonth)
+    const today = new Date()
+
+    for (let monthNum = 0; monthNum <= totalMonths; monthNum++) {
+      const projectedWeight = current + monthlyChange * monthNum
+      const finalWeight = stats.isWeightLoss 
+        ? Math.max(projectedWeight, goal) 
+        : Math.min(projectedWeight, goal)
+
+      const monthDate = new Date(today)
+      monthDate.setMonth(today.getMonth() + monthNum)
+
+      monthlyData.push({
+        period: monthNum,
+        monthNum,
+        weight: Number.parseFloat(finalWeight.toFixed(1)),
+        bmi: Number.parseFloat(calculateBMI(finalWeight, height).toFixed(1)),
+        date: monthDate.toLocaleDateString("en-US", { day: "numeric" }),
+        month: monthDate.toLocaleDateString("en-US", { month: "short" }),
+        fullDate: monthDate,
+      })
+    }
+
+    return monthlyData
+  }
+
+  // Get the forecast data based on current view mode
+  const getDisplayForecast = (): ForecastData[] => {
+    switch (viewMode) {
+      case "daily":
+        return getDailyForecast()
+      case "monthly":
+        return getMonthlyForecast()
+      case "weekly":
+      default:
+        return forecast
+    }
+  }
+
+  const displayForecast = getDisplayForecast()
 
   const getBMICategory = (bmi: number): { label: string; color: string } => {
     if (bmi < 18.5) return { label: "Underweight", color: "text-blue-600" }
@@ -180,14 +369,15 @@ export default function WeightTracker() {
     if (!tableRef.current) return
 
     try {
-      const canvas = await html2canvas(tableRef.current, {
+      const dataUrl = await toPng(tableRef.current, {
         backgroundColor: "#ffffff",
-        scale: 2,
+        pixelRatio: 2,
+        cacheBust: true,
       })
 
       const link = document.createElement("a")
       link.download = `weight-forecast-${new Date().toLocaleDateString("en-US").replace(/\//g, "-")}.png`
-      link.href = canvas.toDataURL()
+      link.href = dataUrl
       link.click()
     } catch (error) {
       console.error("Error exporting table:", error)
@@ -196,7 +386,8 @@ export default function WeightTracker() {
   }
 
   return (
-    <div className="grid gap-6 md:grid-cols-[400px_1fr]">
+    <>
+    <div className="grid gap-6 md:grid-cols-[320px_1fr]">
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -334,11 +525,9 @@ export default function WeightTracker() {
               />
               <span className="flex items-center text-sm text-muted-foreground">{weightUnit}/week</span>
             </div>
-            {stats && (
-              <p className="text-sm text-muted-foreground">
-                Healthy range: {stats.safeWeeklyMin}-{stats.safeWeeklyMax} {weightUnit}/week
-              </p>
-            )}
+            <p className="text-xs text-muted-foreground">
+              💡 Safe range: {weightUnit === "kg" ? "0.5-1.0 kg" : "1.0-2.0 lbs"}/week for weight loss, {weightUnit === "kg" ? "0.25-0.5 kg" : "0.5-1.0 lbs"}/week for weight gain
+            </p>
           </div>
 
           <Button onClick={generateForecast} className="w-full" size="lg">
@@ -427,168 +616,148 @@ export default function WeightTracker() {
         </CardHeader>
         <CardContent>
           {forecast.length > 0 ? (
-            <div className="space-y-6">
-              <ChartContainer
-                config={{
-                  weight: {
-                    label: `Weight (${weightUnit})`,
-                    color: "hsl(var(--chart-1))",
-                  },
-                  bmi: {
-                    label: "BMI",
-                    color: "hsl(var(--chart-2))",
-                  },
-                }}
-                className="h-[500px]"
-              >
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={forecast} margin={{ top: 5, right: 30, left: 10, bottom: 70 }}>
-                    <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
-                    <XAxis
-                      dataKey="week"
-                      className="text-xs"
-                      tickFormatter={(value, index) => {
-                        const data = forecast[index]
-                        return data ? `W${value} ${data.date} ${data.month}` : `W${value}`
-                      }}
-                      angle={-60}
-                      textAnchor="end"
-                      height={70}
-                    />
-                    <YAxis
-                      yAxisId="left"
-                      label={{ value: `Weight (${weightUnit})`, angle: -90, position: "insideLeft" }}
-                      className="text-xs"
-                    />
-                    <YAxis
-                      yAxisId="right"
-                      orientation="right"
-                      label={{ value: "BMI", angle: 90, position: "insideRight" }}
-                      className="text-xs"
-                    />
-                    <ChartTooltip
-                      content={({ active, payload }) => {
-                        if (!active || !payload) return null
-                        return (
-                          <div className="rounded-lg border bg-card p-3 shadow-lg">
-                            <p className="mb-2 text-sm font-semibold">
-                              Week {payload[0]?.payload.week} - {payload[0]?.payload.date} {payload[0]?.payload.month}
-                            </p>
-                            <div className="space-y-1">
-                              <p className="flex items-center gap-2 text-sm">
-                                <span className="h-2 w-2 rounded-full bg-[hsl(var(--chart-1))]" />
-                                Weight:{" "}
-                                <span className="font-semibold">
-                                  {payload[0]?.value} {weightUnit}
-                                </span>
-                              </p>
-                              <p className="flex items-center gap-2 text-sm">
-                                <span className="h-2 w-2 rounded-full bg-[hsl(var(--chart-2))]" />
-                                BMI: <span className="font-semibold">{payload[1]?.value}</span>
-                              </p>
-                            </div>
-                          </div>
-                        )
-                      }}
-                    />
-                    <Legend />
-                    <Line
-                      yAxisId="left"
-                      type="monotone"
-                      dataKey="weight"
-                      stroke="hsl(var(--chart-1))"
-                      strokeWidth={3}
-                      dot={{ fill: "hsl(var(--chart-1))", r: 4 }}
-                      name={`Weight (${weightUnit})`}
-                    />
-                    <Line
-                      yAxisId="right"
-                      type="monotone"
-                      dataKey="bmi"
-                      stroke="hsl(var(--chart-2))"
-                      strokeWidth={3}
-                      dot={{ fill: "hsl(var(--chart-2))", r: 4 }}
-                      name="BMI"
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              </ChartContainer>
-
-              <div className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-lg font-semibold">Forecast Data</h3>
-                  <Button onClick={exportTableAsPNG} variant="outline" size="sm" className="gap-2 bg-transparent">
-                    <Download className="h-4 w-4" />
-                    Export as PNG
-                  </Button>
-                </div>
-
-                <div ref={tableRef} className="rounded-lg border bg-card p-4">
-                  <div className="mb-4">
-                    <h4 className="text-base font-semibold">Weight Loss Forecast</h4>
-                    <p className="text-sm text-muted-foreground">
-                      Generated on{" "}
-                      {new Date().toLocaleDateString("en-US", {
-                        month: "long",
-                        day: "numeric",
-                        year: "numeric",
-                      })}
-                    </p>
-                  </div>
-                  <div className="max-h-[400px] overflow-auto">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead className="w-24">Week</TableHead>
-                          <TableHead>Date</TableHead>
-                          <TableHead className="text-right">Weight ({weightUnit})</TableHead>
-                          <TableHead className="text-right">BMI</TableHead>
-                          <TableHead>BMI Category</TableHead>
-                          <TableHead className="text-right">Change ({weightUnit})</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {forecast.map((data, index) => {
-                          const weightChange =
-                            index === 0 ? 0 : Number.parseFloat((data.weight - forecast[index - 1].weight).toFixed(1))
-                          const fullDate = new Date()
-                          fullDate.setDate(fullDate.getDate() + data.week * 7)
-
-                          return (
-                            <TableRow key={data.week}>
-                              <TableCell className="font-medium">Week {data.week}</TableCell>
-                              <TableCell>
-                                {fullDate.toLocaleDateString("en-US", {
-                                  month: "short",
-                                  day: "numeric",
-                                  year: "numeric",
-                                })}
-                              </TableCell>
-                              <TableCell className="text-right font-medium">{data.weight}</TableCell>
-                              <TableCell className="text-right">{data.bmi}</TableCell>
-                              <TableCell>
-                                <span className={`text-sm font-medium ${getBMICategory(data.bmi).color}`}>
-                                  {getBMICategory(data.bmi).label}
-                                </span>
-                              </TableCell>
-                              <TableCell className="text-right">
-                                {index === 0 ? (
-                                  <span className="text-muted-foreground">-</span>
-                                ) : (
-                                  <span className={weightChange < 0 ? "text-green-600" : "text-blue-600"}>
-                                    {weightChange > 0 ? "+" : ""}
-                                    {weightChange}
-                                  </span>
-                                )}
-                              </TableCell>
-                            </TableRow>
-                          )
-                        })}
-                      </TableBody>
-                    </Table>
-                  </div>
-                </div>
-              </div>
+            <div className="h-[500px]">
+              <Line
+                  data={{
+                    labels: forecast.map((d) => `W${d.week} ${d.date} ${d.month}`),
+                    datasets: [
+                      {
+                        label: `Weight (${weightUnit})`,
+                        data: forecast.map((d) => d.weight),
+                        borderColor: "rgb(99, 102, 241)",
+                        borderWidth: 3,
+                        pointRadius: 4,
+                        pointBackgroundColor: "rgb(99, 102, 241)",
+                        tension: 0.3,
+                        fill: false,
+                        yAxisID: "y",
+                      },
+                      {
+                        label: "BMI",
+                        data: forecast.map((d) => d.bmi),
+                        borderColor: "rgb(168, 85, 247)",
+                        borderWidth: 3,
+                        pointRadius: 4,
+                        pointBackgroundColor: "rgb(168, 85, 247)",
+                        tension: 0.3,
+                        fill: false,
+                        yAxisID: "y1",
+                      },
+                    ],
+                  }}
+                  options={{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                      mode: "index",
+                      intersect: false,
+                    },
+                    plugins: {
+                      legend: {
+                        position: "top",
+                        labels: {
+                          usePointStyle: true,
+                          padding: 20,
+                        },
+                      },
+                      tooltip: {
+                        backgroundColor: "rgba(255, 255, 255, 0.95)",
+                        titleColor: "#1f2937",
+                        bodyColor: "#4b5563",
+                        borderColor: "#e5e7eb",
+                        borderWidth: 1,
+                        cornerRadius: 8,
+                        padding: 12,
+                        displayColors: true,
+                        callbacks: {
+                          label: (context) => {
+                            const label = context.dataset.label || "";
+                            const value = context.parsed.y;
+                            if (label.includes("Weight")) {
+                              return `${label}: ${value} ${weightUnit}`;
+                            }
+                            return `${label}: ${value}`;
+                          },
+                        },
+                      },
+                      annotation: {
+                        annotations: {
+                          underweightZone: {
+                            type: "box",
+                            yScaleID: "y1",
+                            yMin: 12,
+                            yMax: 18.5,
+                            backgroundColor: "rgba(59, 130, 246, 0.08)",
+                            borderWidth: 0,
+                          },
+                          normalZone: {
+                            type: "box",
+                            yScaleID: "y1",
+                            yMin: 18.5,
+                            yMax: 24.9,
+                            backgroundColor: "rgba(34, 197, 94, 0.08)",
+                            borderWidth: 0,
+                          },
+                          overweightZone: {
+                            type: "box",
+                            yScaleID: "y1",
+                            yMin: 24.9,
+                            yMax: 30,
+                            backgroundColor: "rgba(234, 179, 8, 0.08)",
+                            borderWidth: 0,
+                          },
+                          obeseZone: {
+                            type: "box",
+                            yScaleID: "y1",
+                            yMin: 30,
+                            yMax: 40,
+                            backgroundColor: "rgba(239, 68, 68, 0.08)",
+                            borderWidth: 0,
+                          },
+                        },
+                      },
+                    },
+                    scales: {
+                      x: {
+                        grid: {
+                          display: false,
+                        },
+                        ticks: {
+                          maxRotation: 45,
+                          minRotation: 45,
+                        },
+                      },
+                      y: {
+                        type: "linear",
+                        display: true,
+                        position: "left",
+                        min: 40,
+                        max: 100,
+                        title: {
+                          display: true,
+                          text: `Weight (${weightUnit})`,
+                        },
+                        grid: {
+                          color: "rgba(0, 0, 0, 0.05)",
+                        },
+                      },
+                      y1: {
+                        type: "linear",
+                        display: true,
+                        position: "right",
+                        min: 12,
+                        max: 40,
+                        title: {
+                          display: true,
+                          text: "BMI",
+                        },
+                        grid: {
+                          drawOnChartArea: false,
+                        },
+                      },
+                    },
+                  }}
+                />
             </div>
           ) : (
             <div className="flex h-[500px] items-center justify-center rounded-lg border border-dashed">
@@ -601,5 +770,118 @@ export default function WeightTracker() {
         </CardContent>
       </Card>
     </div>
+
+    {/* Forecast Table - Outside Card for full expansion and better PNG export */}
+    {forecast.length > 0 && (
+      <div className="mt-6 space-y-4">
+        <div className="flex items-center justify-between gap-4">
+          <h3 className="text-lg font-semibold">Forecast Data</h3>
+          <div className="flex items-center gap-2">
+            <Select value={viewMode} onValueChange={(value: ViewMode) => setViewMode(value)}>
+              <SelectTrigger className="w-32">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="daily">Daily</SelectItem>
+                <SelectItem value="weekly">Weekly</SelectItem>
+                <SelectItem value="monthly">Monthly</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button onClick={exportTableAsPNG} variant="outline" size="sm" className="gap-2 bg-transparent">
+              <Download className="h-4 w-4" />
+              Export as PNG
+            </Button>
+          </div>
+        </div>
+
+        <div 
+          ref={tableRef} 
+          data-export="true"
+          className="rounded-lg border bg-white p-6"
+          style={{ backgroundColor: "#ffffff" }}
+        >
+          <div className="mb-4">
+            <h4 className="text-base font-semibold" style={{ color: "#1f2937", fontWeight: 600 }}>
+              Weight {stats?.isWeightLoss ? "Loss" : "Gain"} Forecast ({viewMode.charAt(0).toUpperCase() + viewMode.slice(1)})
+            </h4>
+            <p className="text-sm" style={{ color: "#6b7280" }}>
+              Generated on{" "}
+              {new Date().toLocaleDateString("en-US", {
+                month: "long",
+                day: "numeric",
+                year: "numeric",
+              })}
+            </p>
+          </div>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-24" style={{ color: "#374151" }}>
+                  {viewMode === "daily" ? "Day" : viewMode === "monthly" ? "Month" : "Week"}
+                </TableHead>
+                <TableHead style={{ color: "#374151" }}>Date</TableHead>
+                <TableHead className="text-right" style={{ color: "#374151" }}>Weight ({weightUnit})</TableHead>
+                <TableHead className="text-right" style={{ color: "#374151" }}>BMI</TableHead>
+                <TableHead style={{ color: "#374151" }}>BMI Category</TableHead>
+                <TableHead className="text-right" style={{ color: "#374151" }}>Change ({weightUnit})</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {displayForecast.map((data, index) => {
+                const weightChange =
+                  index === 0 ? 0 : Number.parseFloat((data.weight - displayForecast[index - 1].weight).toFixed(1))
+                
+                const getBMICategoryStyle = (bmi: number) => {
+                  if (bmi < 18.5) return { color: "#2563eb" }
+                  if (bmi < 25) return { color: "#16a34a" }
+                  if (bmi < 30) return { color: "#ca8a04" }
+                  return { color: "#dc2626" }
+                }
+
+                const getPeriodLabel = () => {
+                  if (viewMode === "daily") return `Day ${data.period}`
+                  if (viewMode === "monthly") return `Month ${data.period}`
+                  return `Week ${data.period}`
+                }
+
+                return (
+                  <TableRow key={data.period}>
+                    <TableCell className="font-medium" style={{ color: "#1f2937" }}>{getPeriodLabel()}</TableCell>
+                    <TableCell style={{ color: "#374151" }}>
+                      {data.fullDate.toLocaleDateString("en-US", {
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric",
+                      })}
+                    </TableCell>
+                    <TableCell className="text-right font-medium" style={{ color: "#1f2937" }}>{data.weight}</TableCell>
+                    <TableCell className="text-right" style={{ color: "#374151" }}>{data.bmi}</TableCell>
+                    <TableCell>
+                      <span 
+                        className="text-sm font-medium"
+                        style={getBMICategoryStyle(data.bmi)}
+                      >
+                        {getBMICategory(data.bmi).label}
+                      </span>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {index === 0 ? (
+                        <span style={{ color: "#6b7280" }}>-</span>
+                      ) : (
+                        <span style={{ color: weightChange < 0 ? "#16a34a" : "#2563eb" }}>
+                          {weightChange > 0 ? "+" : ""}
+                          {weightChange}
+                        </span>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
+            </TableBody>
+          </Table>
+        </div>
+      </div>
+    )}
+  </>
   )
 }
