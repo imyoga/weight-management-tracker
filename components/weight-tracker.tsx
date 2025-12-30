@@ -73,7 +73,9 @@ const crosshairPlugin: Plugin<"line"> = {
       ctx.fillStyle = "rgb(168, 85, 247)"
       ctx.font = "bold 11px sans-serif"
       ctx.textAlign = "left"
-      ctx.fillText(bmiValue.toFixed(1), chartArea.right + 5, bmiY + 4)
+      if (bmiValue !== null) {
+        ctx.fillText(bmiValue.toFixed(1), chartArea.right + 5, bmiY + 4)
+      }
     }
 
     // Draw weight axis label
@@ -82,7 +84,9 @@ const crosshairPlugin: Plugin<"line"> = {
     ctx.fillStyle = "rgb(99, 102, 241)"
     ctx.font = "bold 11px sans-serif"
     ctx.textAlign = "right"
-    ctx.fillText(weightValue.toFixed(1), chartArea.left - 5, y + 4)
+    if (weightValue !== null) {
+      ctx.fillText(weightValue.toFixed(1), chartArea.left - 5, y + 4)
+    }
 
     // Draw x-axis label
     const xLabel = dataPoint.label
@@ -358,6 +362,55 @@ export default function WeightTracker() {
 
   const displayForecast = getDisplayForecast()
 
+  // Calculate dynamic Y-axis ranges with always 20% padding from actual data
+  const getAxisRanges = () => {
+    const defaultWeightMin = 40
+    const defaultWeightMax = 100
+    const defaultBMIMin = 12
+    const defaultBMIMax = 40
+
+    if (forecast.length === 0) {
+      return {
+        weightMin: defaultWeightMin,
+        weightMax: defaultWeightMax,
+        bmiMin: defaultBMIMin,
+        bmiMax: defaultBMIMax,
+      }
+    }
+
+    const weights = forecast.map((d) => d.weight)
+    const bmis = forecast.map((d) => d.bmi)
+
+    const dataWeightMin = Math.min(...weights)
+    const dataWeightMax = Math.max(...weights)
+    const dataBMIMin = Math.min(...bmis)
+    const dataBMIMax = Math.max(...bmis)
+
+    // Calculate range with 20% padding - ALWAYS apply padding from actual data
+    const weightRange = dataWeightMax - dataWeightMin || 10 // minimum range of 10 if same value
+    const bmiRange = dataBMIMax - dataBMIMin || 5 // minimum range of 5 if same value
+
+    // Weight axis: always ensure 20% padding from actual min/max
+    const weightMinWithPadding = Math.floor(dataWeightMin - weightRange * 0.2)
+    const weightMaxWithPadding = Math.ceil(dataWeightMax + weightRange * 0.2)
+    
+    // Use the more conservative of default or padded value
+    const weightMin = Math.min(defaultWeightMin, weightMinWithPadding)
+    const weightMax = Math.max(defaultWeightMax, weightMaxWithPadding)
+
+    // BMI axis: always ensure 20% padding from actual min/max
+    const bmiMinWithPadding = Math.floor(dataBMIMin - bmiRange * 0.2)
+    const bmiMaxWithPadding = Math.ceil(dataBMIMax + bmiRange * 0.2)
+    
+    // Use the more conservative of default or padded value
+    const bmiMin = Math.min(defaultBMIMin, bmiMinWithPadding)
+    const bmiMax = Math.max(defaultBMIMax, bmiMaxWithPadding)
+
+    return { weightMin, weightMax, bmiMin, bmiMax }
+  }
+
+  const axisRanges = getAxisRanges()
+
   const getBMICategory = (bmi: number): { label: string; color: string } => {
     if (bmi < 18.5) return { label: "Underweight", color: "text-blue-600" }
     if (bmi < 25) return { label: "Normal", color: "text-green-600" }
@@ -474,17 +527,18 @@ export default function WeightTracker() {
           </div>
 
           {recommendedWeight && (
-            <Alert>
-              <Info className="h-4 w-4" />
-              <AlertTitle>Healthy Weight Range</AlertTitle>
-              <AlertDescription>
-                Based on a healthy BMI (18.5-24.9), your recommended weight range is{" "}
-                <span className="font-semibold">
-                  {recommendedWeight.min}-{recommendedWeight.max} {weightUnit}
-                </span>
-                . You can adjust your goal as needed.
-              </AlertDescription>
-            </Alert>
+            <div className="rounded-lg border bg-muted/30 p-4 space-y-2">
+              <div className="flex items-center gap-2">
+                <Info className="h-4 w-4 text-primary" />
+                <span className="text-sm font-medium">Healthy Weight Range</span>
+              </div>
+              <div className="text-2xl font-bold text-primary">
+                {recommendedWeight.min} - {recommendedWeight.max} {weightUnit}
+              </div>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                Based on healthy BMI range (18.5 - 24.9)
+              </p>
+            </div>
           )}
 
           <div className="space-y-2">
@@ -510,13 +564,13 @@ export default function WeightTracker() {
             </div>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="weekly-change">Weekly Weight Change (Optional)</Label>
+          <div className="space-y-3">
+            <Label htmlFor="weekly-change">Weekly Weight Change</Label>
             <div className="flex gap-2">
               <Input
                 id="weekly-change"
                 type="number"
-                placeholder={`Default: Safe range used`}
+                placeholder="Auto (safe range)"
                 value={customWeeklyChange}
                 onChange={(e) => setCustomWeeklyChange(e.target.value)}
                 step="0.1"
@@ -525,80 +579,18 @@ export default function WeightTracker() {
               />
               <span className="flex items-center text-sm text-muted-foreground">{weightUnit}/week</span>
             </div>
-            <p className="text-xs text-muted-foreground">
-              💡 Safe range: {weightUnit === "kg" ? "0.5-1.0 kg" : "1.0-2.0 lbs"}/week for weight loss, {weightUnit === "kg" ? "0.25-0.5 kg" : "0.5-1.0 lbs"}/week for weight gain
-            </p>
+            <div className="rounded-md bg-muted/50 px-3 py-2">
+              <p className="text-xs font-medium text-muted-foreground mb-1.5">Recommended safe ranges:</p>
+              <ul className="text-xs text-muted-foreground space-y-0.5 list-disc list-inside">
+                <li>Weight loss: {weightUnit === "kg" ? "0.5 - 1.0 kg" : "1.0 - 2.0 lbs"}/week</li>
+                <li>Weight gain: {weightUnit === "kg" ? "0.25 - 0.5 kg" : "0.5 - 1.0 lbs"}/week</li>
+              </ul>
+            </div>
           </div>
 
           <Button onClick={generateForecast} className="w-full" size="lg">
             Generate Forecast
           </Button>
-
-          {stats && (
-            <div className="grid grid-cols-2 gap-4 rounded-lg border bg-muted/50 p-4">
-              <div className="space-y-1">
-                <p className="text-sm text-muted-foreground">Weekly Change</p>
-                <p className="flex items-center gap-1 text-lg font-semibold">
-                  {stats.isWeightLoss ? (
-                    <TrendingDown className="h-4 w-4 text-green-600" />
-                  ) : (
-                    <TrendingUp className="h-4 w-4 text-blue-600" />
-                  )}
-                  {stats.weeklyChange.toFixed(1)} {weightUnit}
-                </p>
-              </div>
-              <div className="space-y-1">
-                <p className="text-sm text-muted-foreground">Timeline</p>
-                <p className="flex items-center gap-1 text-lg font-semibold">
-                  <Calendar className="h-4 w-4 text-primary" />
-                  {stats.totalWeeks} weeks
-                </p>
-              </div>
-              <div className="space-y-1">
-                <p className="text-sm text-muted-foreground">Current BMI</p>
-                <p className="text-lg font-semibold">
-                  {stats.currentBMI}{" "}
-                  <span className={`text-sm font-normal ${getBMICategory(stats.currentBMI).color}`}>
-                    {getBMICategory(stats.currentBMI).label}
-                  </span>
-                </p>
-              </div>
-              <div className="space-y-1">
-                <p className="text-sm text-muted-foreground">Goal BMI</p>
-                <p className="text-lg font-semibold">
-                  {stats.goalBMI}{" "}
-                  <span className={`text-sm font-normal ${getBMICategory(stats.goalBMI).color}`}>
-                    {getBMICategory(stats.goalBMI).label}
-                  </span>
-                </p>
-              </div>
-            </div>
-          )}
-
-          <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
-            <h3 className="flex items-center gap-2 text-sm font-semibold">
-              <Info className="h-4 w-4" />
-              BMI Categories
-            </h3>
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-blue-600 font-medium">Underweight</span>
-                <span className="text-muted-foreground">&lt; 18.5</span>
-              </div>
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-green-600 font-medium">Normal</span>
-                <span className="text-muted-foreground">18.5 - 24.9</span>
-              </div>
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-yellow-600 font-medium">Overweight</span>
-                <span className="text-muted-foreground">25 - 29.9</span>
-              </div>
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-red-600 font-medium">Obese</span>
-                <span className="text-muted-foreground">&ge; 30</span>
-              </div>
-            </div>
-          </div>
         </CardContent>
       </Card>
 
@@ -685,7 +677,7 @@ export default function WeightTracker() {
                           underweightZone: {
                             type: "box",
                             yScaleID: "y1",
-                            yMin: 12,
+                            yMin: axisRanges.bmiMin,
                             yMax: 18.5,
                             backgroundColor: "rgba(59, 130, 246, 0.08)",
                             borderWidth: 0,
@@ -710,7 +702,7 @@ export default function WeightTracker() {
                             type: "box",
                             yScaleID: "y1",
                             yMin: 30,
-                            yMax: 40,
+                            yMax: axisRanges.bmiMax,
                             backgroundColor: "rgba(239, 68, 68, 0.08)",
                             borderWidth: 0,
                           },
@@ -731,8 +723,8 @@ export default function WeightTracker() {
                         type: "linear",
                         display: true,
                         position: "left",
-                        min: 40,
-                        max: 100,
+                        min: axisRanges.weightMin,
+                        max: axisRanges.weightMax,
                         title: {
                           display: true,
                           text: `Weight (${weightUnit})`,
@@ -745,8 +737,8 @@ export default function WeightTracker() {
                         type: "linear",
                         display: true,
                         position: "right",
-                        min: 12,
-                        max: 40,
+                        min: axisRanges.bmiMin,
+                        max: axisRanges.bmiMax,
                         title: {
                           display: true,
                           text: "BMI",
@@ -770,6 +762,79 @@ export default function WeightTracker() {
         </CardContent>
       </Card>
     </div>
+
+    {/* Stats and BMI Categories - Side by side below main grid */}
+    {stats && (
+      <div className="mt-6 grid gap-6 md:grid-cols-2">
+        {/* Stats Widget */}
+        <div className="rounded-xl border bg-card p-6 shadow-sm">
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1">
+              <p className="text-sm text-muted-foreground">Weekly Change</p>
+              <p className="flex items-center gap-1 text-lg font-semibold">
+                {stats.isWeightLoss ? (
+                  <TrendingDown className="h-4 w-4 text-green-600" />
+                ) : (
+                  <TrendingUp className="h-4 w-4 text-blue-600" />
+                )}
+                {stats.weeklyChange.toFixed(1)} {weightUnit}
+              </p>
+            </div>
+            <div className="space-y-1">
+              <p className="text-sm text-muted-foreground">Timeline</p>
+              <p className="flex items-center gap-1 text-lg font-semibold">
+                <Calendar className="h-4 w-4 text-primary" />
+                {stats.totalWeeks} weeks
+              </p>
+            </div>
+            <div className="space-y-1">
+              <p className="text-sm text-muted-foreground">Current BMI</p>
+              <p className="text-lg font-semibold">
+                {stats.currentBMI}{" "}
+                <span className={`text-sm font-normal ${getBMICategory(stats.currentBMI).color}`}>
+                  {getBMICategory(stats.currentBMI).label}
+                </span>
+              </p>
+            </div>
+            <div className="space-y-1">
+              <p className="text-sm text-muted-foreground">Goal BMI</p>
+              <p className="text-lg font-semibold">
+                {stats.goalBMI}{" "}
+                <span className={`text-sm font-normal ${getBMICategory(stats.goalBMI).color}`}>
+                  {getBMICategory(stats.goalBMI).label}
+                </span>
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* BMI Categories Widget */}
+        <div className="rounded-xl border bg-card p-6 shadow-sm">
+          <h3 className="flex items-center gap-2 text-sm font-semibold mb-4">
+            <Info className="h-4 w-4" />
+            BMI Categories
+          </h3>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-blue-600 font-medium">Underweight</span>
+              <span className="text-muted-foreground">&lt; 18.5</span>
+            </div>
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-green-600 font-medium">Normal</span>
+              <span className="text-muted-foreground">18.5 - 24.9</span>
+            </div>
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-yellow-600 font-medium">Overweight</span>
+              <span className="text-muted-foreground">25 - 29.9</span>
+            </div>
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-red-600 font-medium">Obese</span>
+              <span className="text-muted-foreground">&ge; 30</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    )}
 
     {/* Forecast Table - Outside Card for full expansion and better PNG export */}
     {forecast.length > 0 && (
